@@ -1,0 +1,267 @@
+---
+title: "analysis"
+output: html_document
+---
+
+```{r}
+install.packages("dplyr")
+install.packages("ggpubr")
+install.packages("ggplot2")
+install.packages("xtable")
+install.packages("cowplot")
+
+library(dplyr)
+library(ggpubr)
+library(ggplot2)
+library(xtable)
+library(cowplot)
+```
+
+Read the data to a dataframe
+
+```{r}
+data <- read.csv(
+  "./data/activity_preprocessed.csv",
+  header = TRUE,
+  stringsAsFactors = FALSE
+)
+```
+
+
+Convert abbreviated badge and activity identifiers to full-name-factors
+```{r}
+badge_names = c("Mortarboard", "Epic", "Legendary")
+activity_names = c("Question", "Answer", "Comment")
+
+data$badge_name = factor(
+  data$badge_name,
+  levels=c("m", "e", "l"),
+  labels=badge_names
+)
+
+data$activity_name = factor(
+  data$activity_name,
+  levels=c("q", "a", "c"),
+  labels=activity_names
+)
+
+```
+
+Filter data to 4 weeks before and after getting the badge, sum activity counts
+Note: week 0 starts at the time of badge receival
+
+```{r}
+data_before <- filter(data, data$week_offset >= -4 & data$week_offset < 0)
+data_after <- filter(data, data$week_offset < 4 & data$week_offset >= 0)
+
+data_before_agg <- data_before %>%
+  group_by(user_id, badge_name, activity_name) %>%
+  summarise(amount = sum(activity_count))
+
+data_after_agg <- data_after %>%
+  group_by(user_id, badge_name, activity_name) %>%
+  summarise(amount = sum(activity_count))
+```
+Create lineplots
+
+```{r}
+for (badge in badge_names)
+{
+  lineplot_data <- data %>%
+    filter(badge_name==badge) %>%
+    group_by(week_offset, activity_name) %>%
+    summarise(Avg = mean(activity_count_standardized, na.rm=TRUE))
+
+  plot <- ggplot(data=lineplot_data,
+         aes(x=week_offset, y=Avg, colour=activity_name)) +
+         geom_line()+
+         ggtitle(paste("Badge '", badge, "'", sep=""))+
+         theme(plot.title = element_text(hjust = 0.5)) +
+         xlab("Weeks after badge receival") +
+         scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+         ylab("Standardized activity count") +
+         scale_y_continuous(breaks = scales::pretty_breaks(n = 10))
+  plot <- plot + labs(colour = "Activity type")
+
+  ggsave(
+    paste("./results/", badge, "_line.pdf", sep=""),
+    device="pdf",
+    width=6,
+    height=2.4,
+  )
+}
+```
+
+Check for normality
+
+```{r}
+
+par(mfrow=c(3,3))
+for (badge in badge_names)
+{
+  for (activity in activity_names)
+  {
+
+    # filter full dataframes to required badge and activity
+    before = filter(
+      data_before_agg,
+      badge_name == badge & activity_name == activity
+    )$amount
+    after = filter(
+      data_after_agg,
+      badge_name == badge & activity_name == activity
+    )$amount
+
+    # filter users with incomplete data
+    invalid_mask = is.na(before) | is.na(after)
+    after = after[!invalid_mask]
+    before = before[!invalid_mask]
+
+    qqnorm(after-before, main = c(badge, activity))
+    qqline(after-before)
+  }
+}
+
+```
+
+Check prerequisite for Wilcoxon test (symmetric distribution)
+
+```{r}
+par(mfrow=c(3,3))
+for (badge in badge_names)
+{
+  for (activity in activity_names)
+  {
+    # filter full dataframes to required badge and activity
+    before = filter(
+      data_before_agg,
+      badge_name == badge & activity_name == activity
+    )$amount
+    after = filter(
+      data_after_agg,
+      badge_name == badge & activity_name == activity
+    )$amount
+
+    # filter users with incomplete data
+    invalid_mask = is.na(before) | is.na(after)
+    before = before[!invalid_mask]
+    after = after[!invalid_mask]
+
+    hist(after-before, breaks=50, main = c(badge, activity))
+
+  }
+}
+```
+
+Calculate statistics and perform paired Wilcoxon tests per activity and badge category
+
+```{r}
+# Initialize result vectors
+badges <- c(
+)
+activities <- c()
+medians_before <- c()
+medians_after <- c()
+wil_values <- c()
+p_values_wilcox <- c()
+sample_size <- c()
+median_differences <- c()
+
+
+for (badge in badge_names)
+{
+  for (activity in activity_names)
+  {
+    badges <- c(badges, badge)
+    activities <- c(activities, activity)
+
+    # filter full dataframes to required badge and activity
+    before = filter(
+      data_before_agg,
+      badge_name == badge & activity_name == activity
+    )$amount
+    after = filter(
+      data_after_agg,
+      badge_name == badge & activity_name == activity
+    )$amount
+
+    # filter users with incomplete data
+    invalid_mask = is.na(before) | is.na(after)
+    before = before[!invalid_mask]
+    after = after[!invalid_mask]
+
+    # calculate medians and sample size
+    medians_before <- c(medians_before, median(before))
+    medians_after <- c(medians_after, median(after))
+    sample_size <- c(sample_size, length(before))
+
+
+    wtest <- wilcox.test(after, before, paired=TRUE, conf.int=TRUE)
+    p_values_wilcox <- c(p_values_wilcox, wtest$p.value * 9)  # bonferroni correction
+    wil_values <- c(wil_values, wtest$statistic)
+    median_differences <- c(median_differences, wtest$estimate)
+
+  }
+}
+
+results = data.frame(
+  badge=badges,
+  activity=activities,
+  median.before=medians_before,
+  median.after=medians_after,
+  median.differences=median_differences,
+  sample.size=sample_size,
+  V=wil_values,
+  p=p_values_wilcox
+)
+
+
+# store results in a csv for use in the report
+write.csv(results, "./results/analysis_results_wilcox.csv", row.names=FALSE)
+```
+
+Create boxplots
+
+```{r}
+data_agg_combined = merge(data_before_agg, data_after_agg, by=c("user_id", "badge_name", "activity_name"))
+data_agg_combined$diff = data_agg_combined$amount.y - data_agg_combined$amount.x
+data_agg_combined
+```
+
+```{r}
+boxplot_questions <- ggplot(
+  data_agg_combined %>% filter(activity_name=="Question"),
+  aes(x=badge_name, y=diff)
+) +
+  geom_boxplot() +
+  facet_grid(. ~ activity_name) +
+  coord_cartesian(ylim=c(-10, 10)) +
+  geom_hline(yintercept = 0, color = "black")
+
+boxplot_answers <- ggplot(
+  data_agg_combined %>% filter(activity_name=="Answer"),
+  aes(x=badge_name, y=diff)
+) +
+  geom_boxplot() +
+  facet_grid(. ~ activity_name) +
+  coord_cartesian(ylim=c(-60, 60)) +
+  geom_hline(yintercept = 0, color = "black")
+
+boxplot_comments <- ggplot(
+  data_agg_combined %>% filter(activity_name=="Comment"),
+  aes(x=badge_name, y=diff)
+) +
+  geom_boxplot() +
+  facet_grid(. ~ activity_name) +
+  coord_cartesian(ylim=c(-100, 100)) +
+  geom_hline(yintercept = 0, color = "black")
+
+cowplot::plot_grid(boxplot_questions, boxplot_answers, boxplot_comments, ncol=3)
+
+ggsave(
+  paste("./results/boxplots.pdf", sep=""),
+  device="pdf",
+  width=7,
+  height=3.5,
+)
+```
